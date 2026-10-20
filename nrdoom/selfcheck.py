@@ -11,6 +11,7 @@ import importlib
 import sys
 from pathlib import Path
 
+from . import __version__
 from .assets import app_dir, asset_root, bundled_music
 
 
@@ -195,7 +196,8 @@ def run() -> int:
                                     "present" if target.is_dir() else "will be created"))
     lines.append(_line("bundled music", bundled.is_dir(), str(bundled)))
 
-    lines += ["", f"frozen      = {getattr(sys, 'frozen', False)}",
+    lines += ["", f"version     = {__version__}",
+              f"frozen      = {getattr(sys, 'frozen', False)}",
               f"executable  = {sys.executable}",
               f"config.json = {app_dir() / 'config.json'}"]
 

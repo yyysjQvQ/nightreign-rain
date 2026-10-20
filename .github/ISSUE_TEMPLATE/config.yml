@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 用法问题先看 README
+    url: https://github.com/yyysjQvQ/nightreign-rain#装--跑
+    about: 装不上、连不上游戏窗口、歌不播，多半是 README 里那几条前提

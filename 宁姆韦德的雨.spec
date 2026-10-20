@@ -98,4 +98,8 @@ exe = EXE(
     upx=False,
     console=False,
     icon=os.path.join("assets", "icon.ico"),
+    # Without this the exe has no file version at all, and a bug report
+    # cannot say which build it came from. Keep it in step with
+    # nrdoom.__version__ and the release tag.
+    version=os.path.join(SPECPATH, "versioninfo.txt"),
 )

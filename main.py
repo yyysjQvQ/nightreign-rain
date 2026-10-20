@@ -7,6 +7,7 @@ import traceback
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
+from nrdoom import __version__
 from nrdoom.assets import APP_NAME, APP_NAME_ASCII, app_dir, ensure_default_music
 from nrdoom.gui import MainWindow
 from nrdoom.gui.theme import apply as apply_theme
@@ -88,6 +89,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv:
+        # A bug report that cannot say which build it came from is worth nothing.
+        print(f"{APP_NAME} {__version__}")
+        sys.exit(0)
     if "--selftest" in sys.argv:
         sys.exit(run_selfcheck())
     try:

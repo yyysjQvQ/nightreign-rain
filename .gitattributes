@@ -1,0 +1,21 @@
+# 行尾：仓库里存 LF，Windows 上签出来是 CRLF（Git for Windows 的默认行为），
+# 二进制文件不许被改写。没有这个文件，跨平台协作时一行改动会变成整文件 diff。
+* text=auto
+
+*.py    text
+*.md    text
+*.txt   text
+*.yml   text
+*.yaml  text
+*.ini   text
+*.bat   text eol=crlf
+*.spec  text
+
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.npz   binary
+*.mp3   binary
+*.m4a   binary
+*.exe   binary

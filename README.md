@@ -1,10 +1,16 @@
 # 宁姆韦德的雨 · nightreign-rain
 
+[![tests](https://github.com/yyysjQvQ/nightreign-rain/actions/workflows/tests.yml/badge.svg)](https://github.com/yyysjQvQ/nightreign-rain/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/yyysjQvQ/nightreign-rain)](https://github.com/yyysjQvQ/nightreign-rain/releases/latest)
+
 打《艾尔登法环：黑夜君临》时，**队友全倒地（最后一格）的那一刻自动放你自己选的歌**，
 有人被救起来就停。一个 Windows 桌面小工具，抓游戏窗口的左上角 HUD 来判断，
 不读游戏内存、不改游戏文件、不联网。
 
-![为什么做这个](assets/cover.jpg)
+*（程序背景原画，非界面截图：）*
+
+![背景原画](assets/cover.jpg)
 
 夜里三个人同时挂在最后一格上，那是整局最安静的一刻。这个工具就是给那一刻配一首歌。
 
@@ -40,9 +46,18 @@
 
 ## 从源码跑
 
+Windows 10/11，**Python 3.11–3.13**（开发用 3.13，CI 跑 3.12）。只有 64 位测过。
+
 ```
 python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python.exe main.py
+```
+
+两个不带界面的入口，出问题时先用它们自查：
+
+```
+.venv\Scripts\python.exe main.py --version      # 打印版本
+.venv\Scripts\python.exe main.py --selftest     # 往旁边写 自检.txt
 ```
 
 测试（约 440 条，纯离屏，不需要游戏在跑）：

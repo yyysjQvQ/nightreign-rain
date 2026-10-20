@@ -1,0 +1,44 @@
+name: tests
+
+# Windows because that is the only platform this app runs on: `windows-capture`
+# is a Rust extension with Windows wheels only, and the whole point is grabbing
+# a game window off a desktop session.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+
+      # The synthetic cases are generated from the one capture that ships, so the
+      # suite covers the same ground here as it does on a maintainer's machine.
+      - name: Generate the synthetic fixtures
+        run: python fixtures/make_synthetic.py
+
+      - name: Run the tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      # The packaged app must still be able to check itself: this is the one test
+      # that exercises the numpy-only HSV and blob labelling end to end.
+      - name: Self-check
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python main.py --selftest
+
+      - name: Show the self-check
+        run: type 自检.txt
+        if: always()

@@ -1,3 +1,6 @@
+# Windows 10/11, 64-bit, Python 3.11-3.13. `windows-capture` only ships Windows
+# wheels, so this file is not installable on Linux or macOS by design.
+
 # Runtime
 PySide6>=6.6
 windows-capture>=2.0

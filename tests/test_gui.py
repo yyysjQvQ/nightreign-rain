@@ -3,6 +3,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+
+from shots import shot
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap
 
@@ -12,7 +14,6 @@ from nrdoom.gui.preview import bgr_to_qimage
 from nrdoom.settings import Settings, Slot
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures"
-from shots import shot
 SLOTS = [Slot(128, 247, 27), Slot(128, 358, 27)]
 
 
@@ -323,6 +324,154 @@ def test_settings_written_on_a_deliberate_change(window, tmp_path):
     assert '"required_bars": 2' in saved
 
 
+def test_the_preview_keeps_the_snapshot_positions_when_slots_are_pushed(qapp, window):
+    """G11 的界面侧。`_push_slots()` 在每次人数变化、悬浮窗重建、自动跟随之后都会跑，
+    而它原来把预览的圈改成 `settings.slots` —— 监听未开时本帧真正用的位置并不是它
+    （对齐器只为本帧临时搬过），于是画面刚刚同帧了，圈又被旧配置换走。
+    预览的位置从此只能来自快照。"""
+    from nrdoom.engine import PreviewSnapshot
+    win = window
+    spots = ((128.0, 247.0, 27.0), (128.0, 358.0, 27.0))
+    win._on_preview_snapshot(PreviewSnapshot(
+        frame_id=7, timestamp_s=0.0, frame=golden(), render_rect=(0, 0, 2276, 1280),
+        spots=spots, readings=(), party_count=2, hud_state="LOCKED",
+        geometry_state="verified", geometry_source="cache"))
+    assert win.preview.slots == [tuple(s) for s in spots]
+    win.settings.slots = [Slot(999.0, 999.0, 27.0), Slot(999.0, 1111.0, 27.0)]
+    win._push_slots()
+    assert win.preview.slots == [tuple(s) for s in spots], (
+        "pushing the saved calibration overwrote what this frame actually used")
+
+
+# -- 定位出问题时要能手动干预（P1-4 / G18）------------------------------------
+def push_snapshot(win, spots=((128.0, 247.0, 27.0), (128.0, 358.0, 27.0)),
+                  state="verified", hud="LOCKED", source="recovery"):
+    from nrdoom.engine import PreviewSnapshot
+    win._on_preview_snapshot(PreviewSnapshot(
+        frame_id=1, timestamp_s=0.0, frame=golden(), render_rect=(0, 0, 2276, 1280),
+        spots=spots, readings=(), party_count=2, hud_state=hud,
+        geometry_state=state, geometry_source=source))
+    return spots
+
+
+def test_redetecting_forgets_the_place_but_not_the_lessons(window):
+    from nrdoom.settings import Layout
+
+    win = window
+    win.engine._frame = golden()
+    win.engine._geom_sig = (2276, 1280, 0, 0, 2276)
+    win.engine.geom.settle([(128, 247, 27), (128, 358, 27)], "cache", 0.0)
+    win.engine.settings.layouts = [
+        Layout(capture=[2276, 1280], box=[0, 0, 2276], slots=[Slot(128, 247, 27)])]
+    win.redetect_btn.click()
+    assert win.engine._geom_sig is None, "it did not actually go and look again"
+    assert len(win.engine.settings.layouts) == 1, "it threw away a proved layout as well"
+    assert "重新找" in win.statusBar().currentMessage()
+
+
+def test_redetecting_without_a_picture_says_so(window):
+    window.redetect_btn.click()
+    assert "先连接" in window.statusBar().currentMessage()
+    assert window.engine._geom_sig is None
+
+
+def test_resetting_the_layout_cache_only_touches_this_box(window, monkeypatch):
+    """G18: the button has to be as narrow as its label."""
+    from nrdoom.settings import Layout
+
+    agree_to_reset(monkeypatch)
+    win = window
+    win.engine._frame = golden()
+    win.engine._geom_sig = (2276, 1280, 0, 0, 2276)
+    win.settings.layouts = [
+        Layout(capture=[2276, 1280], box=[0, 0, 2276], slots=[Slot(128, 247, 27)]),
+        Layout(capture=[2276, 1280], box=[160, 0, 2116], slots=[Slot(280, 229, 25)]),
+        Layout(capture=[1366, 768], box=[0, 0, 1366], slots=[Slot(77, 148, 14.5)])]
+    win.forget_btn.click()
+    left = [(tuple(l.capture), tuple(l.box)) for l in win.settings.layouts]
+    assert left == [((2276, 1280), (160, 0, 2116)), ((1366, 768), (0, 0, 1366))], left
+    assert "已忘记当前布局" in win.statusBar().currentMessage()
+
+
+def test_refusing_the_confirmation_leaves_everything_alone(window, monkeypatch):
+    from nrdoom.settings import Layout
+
+    agree_to_reset(monkeypatch, yes=False)
+    window.settings.layouts = [Layout(capture=[2276, 1280], box=[0, 0, 2276],
+                                      slots=[Slot(128, 247, 27)])]
+    window.engine._geom_sig = (2276, 1280, 0, 0, 2276)
+    window.forget_btn.click()
+    assert len(window.settings.layouts) == 1
+
+
+def test_restoring_needs_a_previous_position_and_says_when_there_is_none(window):
+    window.restore_btn.click()
+    assert "没有可退回" in window.statusBar().currentMessage()
+
+    win = window
+    win.engine.geom.settle([(128, 247, 27), (128, 358, 27)], "cache", 0.0)
+    win.engine.geom.propose([(150, 260, 27), (150, 371, 27)], "realign", 1, 0.1,
+                            2.0, 0.0)
+    win.engine.geom.accept(0.5)
+    win.restore_btn.click()
+    assert win.engine.geom.verified == [(128, 247, 27), (128, 358, 27)]
+    assert "已退回" in win.statusBar().currentMessage()
+
+
+def test_exporting_without_any_diagnostics_points_at_the_switch(window, tmp_path):
+    window.settings.diagnostics_dir = str(tmp_path / "diagnostics")
+    out = window._export_diagnostics()
+    assert out is None
+    assert "诊断记录" in window.statusBar().currentMessage()
+
+
+def test_the_exported_package_holds_the_log_and_no_music(window, tmp_path):
+    run = tmp_path / "diagnostics" / "20261020-120000"
+    (run / "roi").mkdir(parents=True)
+    (run / "events.jsonl").write_text('{"kind":"fire"}\n', encoding="utf-8")
+    (run / "roi" / "stop_1" / "at.npz").parent.mkdir()
+    (run / "roi" / "stop_1" / "at.npz").write_bytes(b"npz")
+    (tmp_path / "music").mkdir(exist_ok=True)
+    (tmp_path / "music" / "雨爱.mp3").write_bytes(b"song")
+    window.settings.diagnostics_dir = str(tmp_path / "diagnostics")
+    out = window._export_diagnostics()
+    assert out and out.is_file() and out.suffix == ".zip", out
+    import zipfile
+
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        assert any(n.endswith("events.jsonl") for n in names), names
+        meta = [n for n in names if n.endswith("meta.txt")]
+        assert meta, names
+        text = zf.read(meta[0]).decode("utf-8")
+        assert "后端" in text and "几何" in text, text
+        assert not any(n.lower().endswith((".mp3", ".m4a", ".ogg", ".wav"))
+                       for n in names), names
+        assert not any("雨爱" in n for n in names), names
+
+
+def test_the_preview_colours_the_circles_by_how_much_to_trust_them(qapp, window):
+    """P1-2: a verified position draws solid green; a position being re-decided draws
+    dashed amber; a picture box that is not settled draws dashed grey and says so in
+    words, because a colour alone is not something to hand a user."""
+    from PySide6.QtCore import Qt
+
+    win = window
+    push_snapshot(win, state="verified", hud="LOCKED")
+    pen, note = win.preview._trust_pen()
+    assert pen.style() == Qt.PenStyle.SolidLine and note == "", (pen.style(), note)
+
+    push_snapshot(win, state="pending", hud="LOCKED")
+    pen, note = win.preview._trust_pen()
+    assert pen.style() == Qt.PenStyle.DashLine
+    assert "重新定位" in note
+
+    push_snapshot(win, state="verified", hud="ACQUIRING")
+    pen, note = win.preview._trust_pen()
+    assert pen.style() == Qt.PenStyle.DashLine
+    assert "不确定" in note
+
+
 # -- preview widget plumbing ---------------------------------------------------
 def test_bgr_to_qimage_keeps_pixel_values(qapp):
     arr = np.zeros((4, 6, 3), dtype=np.uint8)
@@ -628,21 +777,22 @@ def test_restore_defaults_uses_the_shipped_number_not_what_the_window_started_wi
 
 def test_restore_defaults_leaves_the_music_and_the_calibration_alone(window,
                                                                     monkeypatch):
-    from nrdoom.settings import Slot
+    from nrdoom.settings import Layout, Slot
 
     agree_to_reset(monkeypatch)
     window.settings.music_folder = "D:/我的歌"
     window.settings.track_order = ["b.mp3", "a.mp3"]
     window.settings.volume = 0.25
     window.settings.slots = [Slot(1, 2, 3)]
-    window.settings.spots_cache = {"2560x1440": [Slot(4, 5, 6)]}
+    window.settings.layouts = [Layout(capture=[2560, 1440], box=[0, 80, 2560],
+                                      slots=[Slot(4, 5, 6)])]
     mess_up(window)
     window.reset_btn.click()
     assert window.settings.music_folder == "D:/我的歌"
     assert window.settings.track_order == ["b.mp3", "a.mp3"]
     assert window.settings.volume == 0.25
     assert window.settings.slot_tuples() == [(1, 2, 3)]
-    assert list(window.settings.spots_cache) == ["2560x1440"]
+    assert [lay.box for lay in window.settings.layouts] == [[0, 80, 2560]]
 
 
 def test_restore_defaults_asks_before_touching_anything(window, monkeypatch):
@@ -656,7 +806,7 @@ def test_restore_defaults_asks_before_touching_anything(window, monkeypatch):
 def test_the_reset_list_cannot_reach_the_fields_it_promises_to_keep():
     from nrdoom.gui.main_window import RULE_FIELDS
 
-    assert not {"music_folder", "track_order", "volume", "slots", "spots_cache",
+    assert not {"music_folder", "track_order", "volume", "slots", "layouts",
                 "window_title", "play_order"} & set(RULE_FIELDS)
 
 

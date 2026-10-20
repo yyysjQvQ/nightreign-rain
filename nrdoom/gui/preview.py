@@ -85,6 +85,11 @@ class PreviewWidget(QWidget):
         self._origin = QPointF(0, 0)
         self.slots: list[tuple[float, float, float]] = []
         self.readings: list = []
+        # Where these positions came from and how much the tracker trusts the box
+        # they hang off, so the overlay can say so instead of looking confident.
+        self.hud_state = "NONE"
+        self.geometry_state = "verified"
+        self.geometry_source = "seed"
         self.setMinimumSize(480, 270)
 
     # -- content ------------------------------------------------------------
@@ -92,12 +97,19 @@ class PreviewWidget(QWidget):
         self._image = bgr_to_qimage(frame)
         self.update()
 
-    def set_slots(self, slots):
-        self.slots = [_as_tuple(s) for s in slots]
-        self.update()
+    def set_snapshot(self, snap):
+        """The picture, the positions and the counts of one frame, in one repaint.
 
-    def set_readings(self, readings):
-        self.readings = list(readings)
+        Deliberately one method rather than three setters the engine would have to
+        keep in step: apart, a new frame could be shown under circles from whenever
+        the calibration last moved, which is the bug this replaced.
+        """
+        self._image = bgr_to_qimage(snap.frame)
+        self.slots = [_as_tuple(s) for s in snap.spots]
+        self.readings = list(snap.readings)
+        self.hud_state = snap.hud_state
+        self.geometry_state = snap.geometry_state
+        self.geometry_source = snap.geometry_source
         self.update()
 
     # -- geometry ------------------------------------------------------------
@@ -150,18 +162,39 @@ class PreviewWidget(QWidget):
                    | Qt.AlignmentFlag.AlignLeft, "只检测这一块")
         p.restore()
 
+    def _trust_pen(self):
+        """How far the circles being drawn may be believed, as a pen and a word.
+
+        The colour answers "are these positions the ones the tool is sure about",
+        which is a different question from "did a gauge read here" - and the two are
+        only the same when the geometry has actually been verified. Text goes with
+        the colour because a colour alone is not something to hand a user.
+        """
+        if self.hud_state != "LOCKED":
+            return QPen(ZONE, 2, Qt.PenStyle.DashLine), "画面框不确定"
+        if self.geometry_state == "pending":
+            return QPen(GUESS, 2, Qt.PenStyle.DashLine), "正在重新定位"
+        if self.geometry_state == "fallback":
+            return QPen(GUESS, 2, Qt.PenStyle.DashLine), "退回上一个可靠位置"
+        return QPen(OK_EDGE, 2), ""
+
     def _paint_overlays(self, p: QPainter):
         self._paint_zone(p)
+        pen, note = self._trust_pen()
         for i, (cx, cy, radius) in enumerate(self.slots):
             reading = self.readings[i] if i < len(self.readings) else None
             bars = None if reading is None else reading.bars
-            edge = OK_EDGE if bars else GUESS
             r = radius * self._scale
             centre = self.to_widget(cx, cy)
-            p.setPen(QPen(edge, 2))
+            p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(centre, r, r)
             p.drawEllipse(centre, r * 0.45, r * 0.45)
-            p.setPen(QPen(edge))
+            p.setPen(QPen(pen.color()))
             p.drawText(QRectF(centre.x() + r + 4, centre.y() - 10, 60, 20),
                        Qt.AlignmentFlag.AlignLeft, f"#{i + 1}  {'-' if bars is None else bars}")
+        if note and self.slots:
+            centre = self.to_widget(self.slots[0][0], self.slots[0][1])
+            p.setPen(QPen(pen.color()))
+            p.drawText(QRectF(centre.x() + 40, centre.y() - 34, 260, 20),
+                       Qt.AlignmentFlag.AlignLeft, note)

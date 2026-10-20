@@ -1,7 +1,9 @@
 """The control window."""
 from __future__ import annotations
 
+import json
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from ..hud_tracker import LOCKED
 from ..library import SUPPORTED, MusicLibrary
 from ..settings import DEFAULT_PATH, Settings, Slot
 from ..slot_observation import STRONG_ALIVE, STRONG_DOWN
+from .. import __version__
 from . import theme
 from .pet import PetWidget
 from .preview import GaugeBadge, PreviewWidget
@@ -354,6 +357,24 @@ class MainWindow(QMainWindow):
         self.reset_btn.setToolTip("把这一页的数值和开关改回出厂设置。\n"
                                   "曲库、播放顺序、音量和标定位置都不会动。")
         bottom.addWidget(self.reset_btn)
+        # The four things to reach for when the box on the preview is not where the
+        # panel is. They are here rather than in a menu because the moment you want
+        # them is the moment you have already lost confidence in the automatic path.
+        self.redetect_btn = QPushButton("重新检测当前位置")
+        self.redetect_btn.setToolTip("丢掉现在用的计量表位置，按当前画面重新找一遍。\n"
+                                     "已验证过的布局缓存保留，下次还是它。")
+        bottom.addWidget(self.redetect_btn)
+        self.forget_btn = QPushButton("重置当前布局缓存")
+        self.forget_btn.setToolTip("只忘记**当前这套画面**（这个分辨率和信箱黑边组合）记住的位置，\n"
+                                   "其他分辨率、其他黑边组合、曲库和音量都不受影响。")
+        bottom.addWidget(self.forget_btn)
+        self.restore_btn = QPushButton("恢复上次可靠定位")
+        self.restore_btn.setToolTip("退回到上一个被验证过的位置。位置被一次误读带走时用。")
+        bottom.addWidget(self.restore_btn)
+        self.export_btn = QPushButton("导出诊断包")
+        self.export_btn.setToolTip("打包最近一次诊断记录：events.jsonl、HUD 小图、\n"
+                                   "版本、配置摘要和抓屏分辨率。不含整屏录制，也不含你的音乐文件。")
+        bottom.addWidget(self.export_btn)
         bottom.addStretch(1)
         shell.addLayout(bottom)
         return page
@@ -418,6 +439,83 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "已恢复默认（改动了 %d 项）；曲库、播放顺序和标定位置没动。" % len(changed))
 
+    # -- reaching for the geometry by hand ------------------------------------
+    def _redetect_layout(self):
+        if not self.engine.redetect():
+            self.statusBar().showMessage("重新检测需要一张画面：先连接游戏窗口。")
+            return
+        self.statusBar().showMessage("已丢掉现在的位置，下一帧重新找计量表；记住的布局没删。")
+
+    def _forget_layout(self):
+        if self.engine._geom_sig is None:
+            self.statusBar().showMessage("还没有可重置的布局：先连接并看到画面。")
+            return
+        answer = QMessageBox.question(
+            self, "重置当前布局缓存",
+            "要忘记**当前这套画面**记住的计量表位置吗？\n"
+            "其他分辨率、其他黑边组合记住的位置，以及曲库、播放顺序和音量都不受影响。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        gone = self.engine.reset_layout()
+        self._save()
+        self.statusBar().showMessage(
+            "已忘记当前布局（%d 条），下一帧按画面重新找。" % gone
+            if gone else "当前这套画面还没有记住的位置，已经重新检测了。")
+
+    def _restore_layout(self):
+        if not self.engine.restore_layout():
+            self.statusBar().showMessage("没有可退回的上一个可靠位置：这次会话还没换过位置。")
+            return
+        self._save()
+        self.statusBar().showMessage("已退回上一个被验证过的位置。")
+
+    def _diagnostics_folder(self) -> Path | None:
+        """The newest session folder next to the exe, which is the one being asked about."""
+        root = app_dir() / self.settings.diagnostics_dir
+        if not root.is_dir():
+            return None
+        runs = [p for p in root.iterdir() if p.is_dir()]
+        return max(runs, key=lambda p: p.name) if runs else None
+
+    def _export_diagnostics(self):
+        src = self._diagnostics_folder()
+        if src is None:
+            self.statusBar().showMessage(
+                "还没有诊断记录：勾上「诊断记录」再玩一段，才会写这个文件夹。")
+            return
+        meta = src / "meta.txt"
+        try:
+            sig = self.engine._geom_sig
+            meta.write_text("\n".join([
+                "%s %s" % (APP_NAME, __version__),
+                "python  %s" % sys.version.split()[0],
+                "时间    %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+                "抓屏    后端 %s，%d 帧，画面框 %s，本帧测量 %s，状态 %s"
+                % (self.engine.source.backend, self.engine.source.frames,
+                   self.engine._rect, self.engine._raw_rect, self.engine._pose_state),
+                "几何    使用中 %s，已验证 %s，来源 %s，%s"
+                % (self.engine.geom.active, self.engine.geom.verified,
+                   self.engine.geom.source, self.engine.geom.state()),
+                "布局    %s" % (self.settings.layouts or "（还没有记住的布局）"),
+                "设置    %s" % json.dumps(
+                    {k: v for k, v in self.settings.to_dict().items()
+                     if k not in {"layouts"}}, ensure_ascii=False),
+                "", "只包含这一段时间的事件与 HUD 小图：不含整屏录制，也不含音乐文件。",
+            ]), encoding="utf-8")
+        except OSError as exc:
+            self.statusBar().showMessage("写 meta 失败：%s" % exc)
+            return
+        out = src.parent / (src.name + "_诊断包")
+        try:
+            archived = Path(shutil.make_archive(str(out), "zip", str(src)))
+        except OSError as exc:
+            self.statusBar().showMessage("打包失败：%s" % exc)
+            return
+        self.statusBar().showMessage("诊断包已导出：%s" % archived)
+        return archived
+
     # -- wiring ---------------------------------------------------------------
     def _wire(self):
         self.refresh_btn.clicked.connect(self._refresh_windows)
@@ -443,10 +541,15 @@ class MainWindow(QMainWindow):
         self.diag_check.toggled.connect(self._diagnostics_changed)
         self.loop_check.toggled.connect(self._loop_changed)
         self.reset_btn.clicked.connect(self._reset_rules)
+        self.redetect_btn.clicked.connect(self._redetect_layout)
+        self.forget_btn.clicked.connect(self._forget_layout)
+        self.restore_btn.clicked.connect(self._restore_layout)
+        self.export_btn.clicked.connect(self._export_diagnostics)
         self.volume.valueChanged.connect(self._volume_changed)
 
 
         self.engine.frame_ready.connect(self._on_frame)
+        self.engine.preview_snapshot.connect(self._on_preview_snapshot)
         self.engine.readings_changed.connect(self._on_readings)
         self.engine.party_changed.connect(self._on_party)
         self.engine.calibrationChanged.connect(self._on_drift_adopted)
@@ -614,7 +717,11 @@ class MainWindow(QMainWindow):
                 "或用窗口化启动。")
 
     def _push_slots(self):
-        self.preview.set_slots(self.settings.slots)
+        # The preview is not filled from here: its circles come from the snapshot,
+        # which carries the positions this frame actually read. Setting them from
+        # `settings.slots` used to repaint stale circles over a frame that had
+        # already been described - and while disarmed the two are different, because
+        # the aligner moves the panel for the frame without keeping it.
         self._update_slot_labels([])
         self._on_party(self.engine.party.count)   # depends on the slot count too
         self._rebuild_pet()
@@ -715,8 +822,14 @@ class MainWindow(QMainWindow):
         self._save()
 
     # -- engine callbacks -------------------------------------------------------
+    def _on_preview_snapshot(self, snap):
+        """The one place the preview is filled: picture, circles and counts, from
+        the same frame, in one repaint."""
+        self.preview.set_snapshot(snap)
+
     def _on_frame(self, frame):
-        self.preview.set_frame(frame)
+        # No picture is drawn from here any more - `_on_preview_snapshot` owns the
+        # preview, and drawing here is what let a new frame inherit old circles.
         now = time.monotonic()
         if now - self._fps_clock >= 1.0:
             # Count delivered captures, not preview repaints: the preview is
@@ -733,7 +846,8 @@ class MainWindow(QMainWindow):
                 f"后端: {self.engine.source.backend}  实际 {fps:.0f} 帧/秒{note}")
 
     def _on_readings(self, readings):
-        self.preview.set_readings(readings)
+        # The preview's own counts come with the snapshot; this is the text and the
+        # pet, which are allowed to be a frame late and are not drawn over a picture.
         self._update_slot_labels(readings)
         # A frame has been read, so a count of zero now means "solo" rather than
         # "not yet" - and the header has to say it even for a player who armed the

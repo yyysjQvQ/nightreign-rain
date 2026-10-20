@@ -64,6 +64,34 @@ def test_a_stop_also_keeps_the_seconds_after_it(folder):
     assert min(offsets) > 0.0 and max(offsets) <= 2.0, offsets
 
 
+def test_an_unrelated_event_does_not_close_the_stop_s_after_window(folder):
+    """The seconds after a stop are the evidence that he really got up. The geometry
+    events now log to the same file, and routing them through the same bookkeeping
+    let a `geometry_verified` two seconds later switch the collection off mid-answer."""
+    clock = ManualClock()
+    d = Diagnostics(folder, clock=clock, before_s=2.0, after_s=2.0, stride=1)
+    ring = [(50, 60, 20)]
+    for i in range(20):
+        clock.advance(0.1)
+        d.frame(frame(), (0, 0, 200, 200), ring, [], 1, frame_id=i)
+    d.event("stop", frame(), (0, 0, 200, 200), slot=0)
+    for i in range(20, 50):
+        clock.advance(0.1)
+        d.frame(frame(), (0, 0, 200, 200), ring, [], 1, frame_id=i)
+        if i == 30:
+            d.event("geometry_verified", frame(), (0, 0, 200, 200), spots=ring)
+    d.close()
+    saved = list((folder / "roi").glob("stop_*"))[0]
+    after = list(saved.glob("after_*.npz"))
+    assert len(after) >= 15, \
+        "a geometry event cut the stop's after-window short: %d" % len(after)
+    geom = list((folder / "roi").glob("geometry_verified_*"))
+    assert len(geom) == 1, geom
+    assert list(geom[0].glob("at_*.npz")), "the geometry event still needs its own crop"
+    kinds = [l["kind"] for l in lines(folder / "events.jsonl")]
+    assert "geometry_verified" in kinds
+
+
 def test_a_fire_does_not_bank_up_seconds_of_crops(folder):
     """A stop has to be explained; a fire is explained by the frame that caused it.
     Recording both windows for every fire doubled what a session costs on disk."""

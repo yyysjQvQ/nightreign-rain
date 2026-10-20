@@ -8,6 +8,8 @@ bar so that one reads 0, and a genuine window resize that has to be followed.
 import numpy as np
 import pytest
 
+from shots import shot
+
 from nrdoom.hud_tracker import (ACQUIRING, LOCKED, LOST, OCCLUDED, HudTracker)
 
 
@@ -158,3 +160,65 @@ def test_a_real_move_passes_through_lost_on_the_way():
     assert LOST in states, "the gap where neither anchor is being confirmed"
     assert states[-1] == LOCKED
     assert tracker.measure(shot(top=40, bottom=0)).top == 40
+
+
+# -- G01/G02: the width has to be locked along with the origin ------------------
+# The whole ally layout is multiplied out of `rect[2]` (`detector.gauge_spots`), so
+# a box whose left and top are held but whose width comes from the newest frame is
+# an inconsistent answer: left=0 and width=560 describe a picture that ends 80 px
+# short of where it actually ends.
+def test_a_left_overlay_does_not_shrink_the_box():
+    """G01: one frame with 80 px covering the left of the picture."""
+    tracker = HudTracker(window=20)
+    base = shot(w=640, h=400, top=20, bottom=20)
+    for _ in range(12):
+        tracker.measure(base)
+    pose = tracker.measure(shot(w=640, h=400, top=20, bottom=20, left=80))
+    assert pose.rect[:3] == (0, 20, 640), (
+        "the origin was held but the width came through from the occluded frame: "
+        "%r" % (pose.rect,))
+    assert pose.state == OCCLUDED
+
+
+def test_a_right_overlay_does_not_shrink_the_box():
+    """G02, and the worse half: covering the right moves neither left nor top, so
+    the disagreement was not even reported - the state stayed LOCKED while the
+    width came back 80 px short."""
+    tracker = HudTracker(window=20)
+    base = shot(w=640, h=400, top=20, bottom=20)
+    for _ in range(12):
+        tracker.measure(base)
+    pose = tracker.measure(shot(w=640, h=400, top=20, bottom=20, right=80))
+    assert pose.rect[2] == 640, "a one-frame overlay resized the ally layout"
+    assert pose.state == OCCLUDED, "and it was not even reported as disputed"
+
+
+def test_a_sustained_resize_of_the_width_is_followed():
+    """The other side of the same coin: a picture that really did get narrower has
+    to be adopted, or the layout stays wide forever."""
+    tracker = HudTracker(window=20)
+    base = shot(w=640, h=400, top=20, bottom=20)
+    for _ in range(10):
+        tracker.measure(base)
+    narrow = shot(w=640, h=400, top=20, bottom=20, right=80)
+    for _ in range(14):
+        pose = tracker.measure(narrow)
+    assert pose.rect[2] == 560
+    assert pose.state == LOCKED
+
+
+def test_the_box_survives_a_pixel_of_measurement_noise():
+    """Guards the vote's own tolerance rather than a product bug: `hud_rect`
+    measures each edge by sampling every 8th line, so a box that has not moved can
+    come back one pixel apart. Clustering on exact pixels would split the vote down
+    the middle and the tracker would never confirm anything."""
+    tracker = HudTracker(window=20)
+    wide = shot(w=640, h=400, top=20, bottom=20)
+    off = shot(w=640, h=400, top=20, bottom=20, right=1)
+    widths, states = [], []
+    for i in range(20):
+        pose = tracker.measure(off if i % 2 else wide)
+        widths.append(pose.rect[2])
+        states.append(pose.state)
+    assert max(widths) - min(widths) <= 1, widths
+    assert states[-1] == LOCKED, "a one pixel jitter unsettled the anchor"

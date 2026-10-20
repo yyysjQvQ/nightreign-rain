@@ -145,6 +145,15 @@ class Diagnostics:
         self.flush()
         tag = "%s_%07.2f" % (kind, now)
         out = self.folder / "roi" / tag
+        if kind not in ("fire", "stop"):
+            # A geometry change gets its own line and its own crop, and nothing else:
+            # touching the window below would close the "five seconds after the stop"
+            # collection that is the evidence for a different decision entirely.
+            out.mkdir(exist_ok=True)
+            if frame is not None:
+                np.savez_compressed(out / "at_+00.00s.npz",
+                                    frame=hud_roi(frame, rect))
+            return out
         out.mkdir(exist_ok=True)
         if kind == "stop":
             # Only a stop needs the seconds around it: a fire is explained by the

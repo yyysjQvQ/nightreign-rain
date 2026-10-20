@@ -1,14 +1,17 @@
 from pathlib import Path
 
 import cv2
+import json
+import numpy as np
 import pytest
+
+from shots import shot
 
 from fakes import FakePlayer, FakeSource
 from nrdoom.engine import Engine
 from nrdoom.settings import Settings, Slot
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures"
-from shots import shot
 GOLDEN_SLOTS = [Slot(128, 247, 27), Slot(128, 358, 27)]
 
 
@@ -400,17 +403,38 @@ def test_solo_never_fires_and_never_crashes(qapp):
 
 
 def test_armed_read_adopts_a_drifted_calibration(qapp):
-    """If the game window shifts, the stored positions should follow, not go silent."""
+    """If the game window shifts, the tool has to follow it on the next frame - but
+    only start *believing* the new place once separate captures have agreed on it.
+
+    That split is the whole of P0-3: the old code let one jitter search write the
+    calibration, so a single grazing read of somebody else's ring outlived its frame
+    and was loaded again on the next launch. Recovery speed is kept by using the
+    position at once; the cache is kept safe by making it wait.
+    """
     drifted = [Slot(80, 151, 14.5), Slot(80, 218, 14.3)]
-    eng, src, player, st = build(frame("real_dusk_3bars.jpg"), slots=drifted, hold=1)
+    img = frame("real_dusk_3bars.jpg")
+    st = Settings(slots=list(drifted), hold_frames=1)
+    src = FakeSource(img)
+    ticks = iter(range(10_000))
+    eng = Engine(st, source=src, player=FakePlayer(),
+                 clock=lambda: next(ticks) * 0.1)
     changed = []
     eng.calibrationChanged.connect(lambda: changed.append(1))
     eng.set_listening(True)
+    src.set_frame(img)
     eng._tick()
-    assert changed == [1]
     assert abs(st.slots[0].cx - 77) <= 2 and abs(st.slots[0].cy - 148) <= 2
     assert abs(st.slots[1].cx - 77) <= 2 and abs(st.slots[1].cy - 215) <= 2
     assert [r.bars for r in eng.readings] == [3, 3]
+    assert changed == [], "one frame's jitter search became the stored calibration"
+    assert kept(st, eng) == [], "a first, unconfirmed frame was written to the store"
+
+    for _ in range(6):
+        src.set_frame(img)
+        eng._tick()
+    assert changed == [1], "several separate captures agreed and it still never committed"
+    assert kept(st, eng)[1][1] == pytest.approx(215, abs=2)
+    assert eng.geom.candidate is None
 
 
 def test_a_weak_off_centre_read_does_not_move_the_geometry(qapp, monkeypatch):
@@ -853,3 +877,336 @@ def test_it_does_not_start_a_second_song_over_the_one_already_playing(qapp):
         eng._tick()
     assert player.calls == ["doom.mp3"], player.calls
     assert player.stops == 0
+
+
+# -- 同帧预览快照（报告 §1.1、§P1-2 的 G11/G12）------------------------------
+# The order used to be: announce the frame, then work out where the panel is. The
+# interface therefore painted a new picture under circles that came from whenever
+# the calibration last changed, and the two disagreed by however far the letterbox
+# had moved since. A snapshot is one object carrying both.
+def test_the_snapshot_carries_the_picture_and_the_positions_of_that_frame(qapp):
+    eng, src, player, st = build(frame())
+    got = []
+    eng.preview_snapshot.connect(got.append)
+    eng._tick()
+    assert len(got) == 1
+    snap = got[0]
+    assert snap.frame is src.img
+    assert snap.frame_id == src.frames
+    assert snap.readings == tuple(eng.readings)
+    assert len(snap.readings) <= len(snap.spots)
+    for spot, ring in zip(snap.spots, snap.readings):
+        if ring is not None:
+            # What was read belongs to where we say we looked, or the picture the
+            # user is being shown is describing somebody else's gauge.
+            assert abs(ring.cx - spot[0]) <= spot[2]
+            assert abs(ring.cy - spot[1]) <= spot[2]
+
+    other = frame()
+    src.set_frame(other)
+    eng._last_preview = 0.0              # the preview throttle expired
+    eng._tick()
+    assert got[1].frame is other and got[1].frame_id == src.frames
+
+
+def test_the_snapshot_and_the_readings_describe_the_same_frame(qapp):
+    """G12: the picture, the positions and the counts must not be three updates the
+    interface can interleave in any order. Whatever `readings_changed` last said,
+    the snapshot that follows has to agree with it."""
+    eng, src, player, st = build(frame())
+    seen = []
+    last = []
+    eng.readings_changed.connect(last.append)
+    eng.preview_snapshot.connect(lambda snap: seen.append(
+        (snap.frame_id, tuple(snap.readings) == tuple(last[-1]))))
+    eng._tick()
+    eng._last_preview = 0.0
+    src.set_frame(frame())
+    eng._tick()
+    assert len(seen) == 2
+    assert all(ok for _fid, ok in seen), seen
+    assert seen[0][0] != seen[1][0], "a re-served frame was stamped as a new one"
+
+
+# -- 精修候选的水平约束（报告 §1.3 的 G06）------------------------------------
+def _move_off_panel():
+    """The panel as the fixture has it, and a geometry 53 px below it."""
+    return [(128.0, 247.0, 27.0), (128.0, 358.0, 27.0)], \
+           [(128.0, 300.0, 27.0), (128.0, 411.0, 27.0)]
+
+
+def _to_the_panel(qapp, monkeypatch):
+    """Patch the portraits to point at the real panel, so the aligner decides it
+    has to move, and make any position that is not the stale one score higher -
+    otherwise the read-score gate would be the reason nothing moved, not the
+    constraint under test."""
+    real, wrong = _move_off_panel()
+    monkeypatch.setattr("nrdoom.engine.row_peaks",
+                        lambda frame, ys, rect=None: [(y, 0.5) for y in
+                                                      [247.0, 358.0]])
+    monkeypatch.setattr(Engine, "_read_score", staticmethod(
+        lambda frame, spots: 0.5 if any(abs(s[1] - 300.0) < 1 for s in spots) else 1.0))
+    return real, wrong
+
+
+def test_a_candidate_on_the_right_row_but_far_across_is_not_a_position(qapp, monkeypatch):
+    """`propose_rings` walks the whole search band and hands back everything that
+    looks like a gauge, sorted top to bottom - so `near[0]` was the *topmost* ring
+    whose vertical offset was close enough, with no constraint on x at all. A bright
+    arc anywhere on that row could become the calibration."""
+    real, wrong = _to_the_panel(qapp, monkeypatch)
+    from nrdoom.detector import Ring, hud_rect
+    monkeypatch.setattr("nrdoom.engine.propose_rings", lambda frame: [
+        Ring(128.0 + 400, 247.0, 27.0, 3, 1.0), Ring(128.0 + 400, 358.0, 27.0, 3, 1.0)])
+    eng, src, player, st = build(frame(), slots=[Slot(*s) for s in wrong])
+    moved = eng._align_spots(frame(), wrong, hud_rect(frame()))
+    assert all(abs(s[0] - 128.0) <= 27.0 for s in moved), (
+        "the panel slid %d px sideways onto a ring that is not the ally HUD"
+        % abs(moved[0][0] - 128.0))
+
+
+def test_a_candidate_beside_the_row_is_still_adopted(qapp, monkeypatch):
+    """The gate has to reject the wrong ring, not every ring: within two radii of
+    where the panel's column is, the fine position is still taken."""
+    real, wrong = _to_the_panel(qapp, monkeypatch)
+    from nrdoom.detector import Ring, hud_rect
+    monkeypatch.setattr("nrdoom.engine.propose_rings", lambda frame: [
+        Ring(128.0 + 20, 247.0, 27.0, 3, 1.0), Ring(128.0 + 20, 358.0, 27.0, 3, 1.0)])
+    eng, src, player, st = build(frame(), slots=[Slot(*s) for s in wrong])
+    moved = eng._align_spots(frame(), wrong, hud_rect(frame()))
+    assert moved[0][0] == pytest.approx(148.0, abs=1.0)
+    assert moved[0][1] == pytest.approx(247.0, abs=1.0)
+
+
+def test_a_position_the_preview_used_is_not_left_in_the_cache(qapp, monkeypatch):
+    """G11: while disarmed the aligner may look at a better place for this frame,
+    and the preview has to show exactly that place - but the user's saved geometry
+    must still be the one it was."""
+    from nrdoom.detector import Ring, hud_rect
+    real, wrong = _to_the_panel(qapp, monkeypatch)
+    monkeypatch.setattr("nrdoom.engine.propose_rings", lambda frame: [
+        Ring(128.0, 247.0, 27.0, 3, 1.0), Ring(128.0, 358.0, 27.0, 3, 1.0)])
+    eng, src, player, st = build(frame(), slots=[Slot(*s) for s in wrong])
+    got = []
+    eng.preview_snapshot.connect(got.append)
+    for _ in range(3):            # the vote needs two agreeing frames before the
+        src.set_frame(frame())    # engine will remember anything at all
+        eng._last_preview = 0.0
+        eng._tick()
+    assert st.slot_tuples() == pytest.approx(wrong), "a disarmed look rewrote the slots"
+    assert kept(st, eng) == pytest.approx(wrong), "a disarmed look rewrote the store"
+    assert [tuple(round(v) for v in s) for s in got[-1].spots] == \
+           [(128, 247, 27), (128, 358, 27)], (
+        "the preview is still drawing the stale position, not this frame's")
+
+
+# -- P0-1：画面框的左边和宽度也是几何的一部分（G03/G04）----------------------
+# A picture resized inside an unchanged capture - the game window moved, the side
+# bars changed - keeps the top edge and the capture size, which is all the re-seed
+# test used to look at. The first width fix made that worse in one way and better
+# in another: a single occluded frame can no longer resize anything (G01/G02), but
+# a *legitimate* resize would then never be followed at all.
+CANVAS = 2596
+
+
+def picture(scale: float, left: int):
+    """The golden capture, uniformly scaled, pasted inside one fixed canvas.
+
+    Uniform scaling is what the game does to its own HUD, and it keeps the gauge a
+    circle: the point of the fixture is that a *correct* layout exists for the new
+    box and actually reads, so a reseed can be told apart from a stale guess.
+    """
+    img = frame()
+    pic = cv2.resize(img, (round(img.shape[1] * scale), round(img.shape[0] * scale)))
+    canvas = np.zeros((img.shape[0], CANVAS, 3), img.dtype)
+    canvas[:pic.shape[0], left:left + pic.shape[1]] = pic
+    return canvas
+
+
+BASE_BOX = (160, 0, 2276)                     # bars 160 px on either side
+NARROW_BOX = (240, 0, 2116)                   # the side bars grew; the top did not
+NARROW = NARROW_BOX[2] / BASE_BOX[2]
+
+
+def run(qapp, eng, src, img, n):
+    for _ in range(n):
+        src.set_frame(img)
+        eng._last_preview = 0.0
+        eng._tick()
+    return eng.settings.slot_tuples()
+
+
+def kept(st, eng):
+    """What the store believes for the picture box we are looking at right now."""
+    capture, box = (eng._geom_sig[0], eng._geom_sig[1]), eng._geom_sig[2:]
+    lay = st.layout_for(capture, box)
+    return [] if lay is None else [(s.cx, s.cy, s.radius) for s in lay.slots]
+
+
+def test_a_stable_side_bar_change_reseeds_the_layout(qapp):
+    """G03: 左右黑边持续真实变化，tracker 采纳之后必须重新播种。"""
+    eng, src, player, st = build(picture(1.0, 160), slots=[], hold=1,
+                                 party_hold_frames=1)
+    eng.set_listening(True)
+    wide = run(qapp, eng, src, picture(1.0, 160), 40)
+    assert [round(s[0]) for s in wide] == [289, 289], wide
+    # The panel is where the wide box says it is, and it reads.
+    assert [None if r is None else r.bars for r in eng.readings] == [3, 3]
+
+    narrow = run(qapp, eng, src, picture(NARROW, 240), 60)
+    assert [round(s[0]) for s in narrow] == [360, 360], (
+        "the picture box moved 80 px and shrank 160 px, the layout stayed put: %r"
+        % (narrow,))
+    assert [None if r is None else r.bars for r in eng.readings] == [3, 3], (
+        "and after the move it can no longer read the gauges")
+    assert [round(s[0]) for s in kept(st, eng)] == [360, 360]
+
+
+def test_the_layout_of_a_box_coming_back_is_recovered(qapp, monkeypatch):
+    """G04: 变化之后再切回来，原来那套（已被修正过的）位置要能找回来。
+
+    The aligner is given a 25 px correction during the first box, then turned off;
+    only the remembered layout can produce that number after the round trip.
+    """
+    real_grid = 246.9
+    monkeypatch.setattr("nrdoom.engine.row_peaks",
+                        lambda frame, ys, rect=None: [(y - 25.0, 0.5) for y in ys])
+    monkeypatch.setattr(Engine, "_read_score", staticmethod(
+        lambda frame, spots: 0.5 if abs(spots[0][1] - real_grid) < 1 else 1.0))
+    eng, src, player, st = build(picture(1.0, 160), slots=[], hold=1,
+                                 party_hold_frames=1)
+    eng.set_listening(True)
+    wide = run(qapp, eng, src, picture(1.0, 160), 40)
+    assert wide[0][1] == pytest.approx(real_grid - 25.0, abs=1.0), wide
+    run(qapp, eng, src, picture(NARROW, 240), 60)
+    monkeypatch.setattr("nrdoom.engine.row_peaks",
+                        lambda frame, ys, rect=None: [(y, 0.0) for y in ys])
+    back = run(qapp, eng, src, picture(1.0, 160), 60)
+    assert back[0][1] == pytest.approx(real_grid - 25.0, abs=1.0), (
+        "coming back to the old picture box did not restore the layout it had: %r"
+        % (back,))
+
+
+def test_a_one_frame_side_overlay_touches_nothing(qapp):
+    """G01/G02 from the engine's side, and the guard on the new signature: the box
+    now carries left and width, so a single overlay must not reseed - it would cost
+    the roster every time something passes over the picture."""
+    eng, src, player, st = build(picture(1.0, 160), slots=[], hold=1,
+                                 party_hold_frames=1)
+    eng.set_listening(True)
+    wide = run(qapp, eng, src, picture(1.0, 160), 40)
+    cached = kept(st, eng)
+    overlay = picture(1.0, 160)
+    overlay[:, :240] = 0                      # 80 px more black on the left
+    src.set_frame(overlay)
+    eng._tick()
+    assert eng.settings.slot_tuples() == wide, "one occluded frame moved the layout"
+    assert [tuple(round(v) for v in s) for s in kept(st, eng)] == \
+           [tuple(round(v) for v in s) for s in cached], "and wrote it to the store"
+
+
+def test_an_unconfirmed_box_is_never_written_to_the_store(qapp):
+    """Requirement 3 of P0-1: while the vote has not confirmed the picture box -
+    ACQUIRING, or LOST after a fade - a frame's temporary geometry may be *used*,
+    but remembering it means the next launch starts from the mistake too."""
+    faded = picture(1.0, 160)
+    faded[:312, :] = 0                        # a fade measured as 312 px of bar
+    eng, src, player, st = build(faded, slots=[], hold=1, party_hold_frames=1)
+    eng.set_listening(True)
+    src.set_frame(faded)
+    eng._tick()
+    assert eng._pose_state == "ACQUIRING", eng._pose_state
+    assert st.layouts == [], (
+        "the first frame's unconfirmed box was written to the store: %r"
+        % (st.layouts,))
+    assert st.slots, "but the live positions still have to be usable"
+
+
+# -- P1-3：定位失效不是关于游戏的信息（G15 / G16 / G17）----------------------
+def test_a_lost_picture_box_is_never_read_as_an_ally_standing_up(qapp):
+    """G15. The box gone, the gauge gone with it, and a red band in the background
+    that looks like a health bar: three reasons to think somebody stood up, none of
+    them allowed to end a song. Standing up is something the tool has to *see*."""
+    eng, src, player, st = build(frame(), hold=1)
+    arm_and_fire(eng, player)
+    dark = np.zeros_like(frame())
+    paint_health_bar(dark, 358)
+    src.set_frame(dark)
+    eng._tick()
+    # The first frame after the picture goes: two allies are still counted, so the
+    # evidence exists, and every one of it has to be refused as "standing up".
+    assert eng._pose_state != "LOCKED", eng._pose_state
+    assert eng.observations, "the evidence was not even built, so this proved nothing"
+    assert all(not o.position_ok for o in eng.observations), \
+        "a box that is not settled was allowed to prove somebody stood up"
+    for _ in range(11):
+        src.set_frame(dark)
+        eng._tick()
+    assert player.stops == 0, "a box we lost was reported as an ally standing up"
+    assert player.calls == ["doom.mp3"], "and the song restarted over itself"
+
+
+def test_one_ally_still_down_holds_the_song_through_the_other_one_s_revive(qapp):
+    """G16: one ally on his third segment, one on the way up. The second is a revive
+    in progress, not a reason to stop, and the first is proof nobody is safe yet."""
+    eng, src, player, st = build(frame(), hold=1, party_hold_frames=1)
+    arm_and_fire(eng, player)
+    partial = erase_ring(frame(), 332)        # row 1 loses its gauge, row 0 keeps three
+    for _ in range(20):
+        src.set_frame(partial)
+        eng._tick()
+    assert player.stops == 0, [None if r is None else r.bars for r in eng.readings]
+    assert player.calls == ["doom.mp3"]
+
+
+def test_a_black_screen_or_a_dropped_connection_starts_no_second_song(qapp):
+    """G17. A blank capture is the worst possible trigger for "everyone is down": it
+    reads as nothing, which the old code could read as a fresh three-segment party or
+    as a revive, and either way the answer was a second track over the first."""
+    eng, src, player, st = build(frame(), hold=1, party_hold_frames=1)
+    arm_and_fire(eng, player)
+    black = np.zeros_like(frame())
+    for _ in range(10):
+        src.set_frame(black)
+        eng._tick()
+    assert player.calls == ["doom.mp3"], player.calls
+    assert player.stops == 0
+    src.set_frame(frame())
+    for _ in range(10):
+        eng._tick()
+    assert player.calls == ["doom.mp3"], "the picture coming back queued a second track"
+    assert player.stops == 0
+
+
+def test_the_geometry_changes_are_written_out_for_a_human_to_read(qapp, tmp_path):
+    """§4: the log has to answer "why did that box move" as a sequence, and those
+    state changes are worth a line and a crop of their own."""
+    from nrdoom.diag import Diagnostics
+    from nrdoom.replay import ManualClock
+
+    clock = ManualClock()
+    diag = Diagnostics(tmp_path / "d", clock=clock, before_s=1.0, stride=1)
+    st = Settings(slots=[Slot(128, 252, 27), Slot(128, 363, 27)], hold_frames=1,
+                  party_hold_frames=1)
+    src = FakeSource(frame())
+    eng = Engine(st, source=src, player=FakePlayer(), clock=clock, diag=diag)
+    eng.set_listening(True)
+    for i in range(12):
+        clock.advance(0.05)
+        src.set_frame(frame())
+        eng._tick()
+    diag.close()
+    rows = [json.loads(line) for line in
+            (tmp_path / "d" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    kinds = [r["kind"] for r in rows]
+    assert "geometry_proposed" in kinds, kinds
+    assert "geometry_verified" in kinds, kinds
+    # A frame line carries both boxes and both layouts: which one the tracker is
+    # defending, and which one this frame alone would have said.
+    frame_rows = [r for r in rows if r["kind"] == "frame"]
+    assert frame_rows, kinds
+    for key in ("raw_rect", "kept_spots", "geom", "geom_src", "candidate", "score"):
+        assert key in frame_rows[0], (key, frame_rows[0])
+    moved = [r for r in rows if r["kind"].startswith("geometry_")]
+    assert all(r["spots"] for r in moved), moved[0]

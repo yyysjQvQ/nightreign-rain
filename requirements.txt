@@ -1,0 +1,13 @@
+# Runtime
+PySide6>=6.6
+windows-capture>=2.0
+mss>=9.0
+numpy>=1.26
+
+# Build
+pyinstaller>=6.0
+
+# Test only: opencv is the reference the numpy HSV / blob labelling is checked
+# against (tests/test_cv2_equivalence.py) and is excluded from the packaged exe.
+opencv-python>=4.9
+pytest>=8.0

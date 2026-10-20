@@ -1,0 +1,31 @@
+# 环境和构建产物
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+/build/
+/dist/
+
+# 你这台机器的状态
+/config.json
+/config.json.bak
+/崩溃.log
+/启动错误.log
+/自检.txt
+
+# 你自己的歌：程序只认这个文件夹，歌不入库
+/music/*
+!/music/README.txt
+
+# 测试图：真实游戏截图，不入库（见 fixtures/README.md）
+/fixtures/*
+!/fixtures/README.md
+!/fixtures/make_synthetic.py
+
+# 唯一随仓库走的一张：它是 make_synthetic.py 的底图
+!/fixtures/golden_both_3bars.jpg
+
+# 构建日志和自检输出
+/build_pyi.log
+/selftest.txt
+/自检.txt

@@ -3,7 +3,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号用
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.1] - 2026-10-20
+## [1.1] - 2026-10-22
 
 一轮只动"往哪儿看"的修复，识别判据与音乐逻辑没变。
 

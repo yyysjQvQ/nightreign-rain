@@ -30,7 +30,10 @@ jobs:
       - name: Run the tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+        # The runner has no audio output, and Qt's multimedia backend has crashed
+        # outright in the middle of those tests - taking every test after it with it.
+        # They still run on any machine that can make a sound.
+        run: python -m pytest -q -m "not needs_audio"
 
       # The packaged app must still be able to check itself: this is the one test
       # that exercises the numpy-only HSV and blob labelling end to end.
@@ -40,5 +43,5 @@ jobs:
         run: python main.py --selftest
 
       - name: Show the self-check
-        run: type 自检.txt
+        run: Get-Content 自检.txt -ErrorAction SilentlyContinue
         if: always()

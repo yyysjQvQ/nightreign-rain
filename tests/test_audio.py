@@ -5,6 +5,13 @@ import pytest
 
 pytest.importorskip("PySide6.QtMultimedia")
 
+# Everything here drives a real QMediaPlayer. On a machine with no audio output -
+# every CI runner - Qt's multimedia backend has taken an access violation *inside* a
+# test, which kills the process and hides the rest of the suite with it. The library
+# and ordering logic that does not need a device is covered by test_library.py, which
+# still runs there; these are kept for a desktop that can actually play something.
+pytestmark = pytest.mark.needs_audio
+
 from nrdoom.audio import MusicPlayer            # noqa: E402
 from nrdoom.library import MusicLibrary         # noqa: E402
 

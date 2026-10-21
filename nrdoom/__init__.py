@@ -5,4 +5,4 @@
 properties by `versioninfo.txt`. Bump all three together.
 """
 
-__version__ = "1.0"
+__version__ = "1.1"

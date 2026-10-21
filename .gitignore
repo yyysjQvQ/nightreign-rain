@@ -9,6 +9,7 @@ __pycache__/
 # 你这台机器的状态
 /config.json
 /config.json.bak
+/config.json.tmp
 /崩溃.log
 /启动错误.log
 /自检.txt

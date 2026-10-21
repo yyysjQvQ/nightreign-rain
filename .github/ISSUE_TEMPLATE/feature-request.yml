@@ -1,0 +1,42 @@
+name: 功能建议
+description: 想让它多做一件事，或者换个做法
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先说清楚**你现在是怎么绕过去的**——很多建议其实有一个更简单的解法，
+        或者是一件"看着简单、其实会打破某条判据"的事（README 的「已知边界」里有几例）。
+  - type: textarea
+    id: want
+    attributes:
+      label: 想让它做什么
+      description: 一句话说清目标，再说你期望它怎么表现。
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 现在哪里不够用
+      description: 具体场景、多久遇到一次、现在你怎么处理。
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 大概是哪一块
+      options:
+        - 定位 / 检测（什么时候放歌、什么时候停）
+        - 音乐播放（曲库、顺序、音量）
+        - 界面与悬浮窗
+        - 安装、打包、兼容性
+        - 其他 / 说不准
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 附加信息
+      description: 截图、诊断包、你的分辨率与窗口模式（无边框 / 窗口化）。
+    validations:
+      required: false
